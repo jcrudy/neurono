@@ -6,3 +6,5 @@
 neurono/test/test_neurono.pyc
 
 build/temp.macosx-10.5-x86_64-2.7/neurono/_neurono.o
+
+*.so

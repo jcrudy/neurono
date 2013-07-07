@@ -209,9 +209,11 @@ cdef class NeuralNetwork:
                 _nodes[from_ind,2] = self.f_prime(_nodes[from_ind,1])*_nodes[to_ind,2]*_weights[conn]
             layer_to_update_start -= _conn_layers[i]
             
-                                                     
-    
-    cpdef fit(NeuralNetwork self, cnp.ndarray[FLOAT_t, ndim=2] X, cnp.ndarray[FLOAT_t, ndim=2] y):
+    cdef bool stop_check(NeuralNetwork self, FLOAT_t error):
+        return error < self.thresh
+
+cdef class BackpropNetwork(NeuralNetwork):
+    cpdef fit(BackpropNetwork self, cnp.ndarray[FLOAT_t, ndim=2] X, cnp.ndarray[FLOAT_t, ndim=2] y):
         cdef cnp.ndarray[FLOAT_t, ndim=2] _nodes = <cnp.ndarray[FLOAT_t, ndim=2]> self._nodes
         cdef cnp.ndarray[INDEX_t, ndim=2] _connections = <cnp.ndarray[INDEX_t, ndim=2]> self._connections
         cdef cnp.ndarray[FLOAT_t, ndim=1] _weights = <cnp.ndarray[FLOAT_t, ndim=1]> self._weights
@@ -241,23 +243,130 @@ cdef class NeuralNetwork:
                 self.prop()
                 error += self.present(y,row)
                 self.back_prop()
-                k = 0
                 for conn in range(n_connections):
                     from_ind = _connections[conn,0]
                     to_ind = _connections[conn,1]
-                    weight = _weights[conn]
                     delta[conn] += _nodes[to_ind,2] * _nodes[from_ind,1]
             
             if self.stop_check(error):
                 break
             for conn in range(n_connections):
                 _weights[conn] += rate * delta[conn] / m
+                delta[conn] = 0.0
             if error > prev_error:
                 rate *= rate_decrease
             elif error <= prev_error:
                 rate *= rate_increase
             prev_error = error
-    cdef bool stop_check(NeuralNetwork self, FLOAT_t error):
-        return error < self.thresh
+            
+cdef class BirdNetwork(NeuralNetwork):
+    cdef cnp.ndarray _accumulators
+    def __init__(self, layers, rate=0.1, thresh=0.000000001):
+        NeuralNetwork.__init__(self, layers, rate, thresh)
+        self._accumulators = np.zeros(shape=self._layers[-1],dtype=FLOAT)
     
+    cdef reset_accumulators(BirdNetwork self):
+        cdef cnp.ndarray[FLOAT_t, ndim=1] _accumulators = <cnp.ndarray[FLOAT_t, ndim=1]> self._accumulators
+        cdef INDEX_t i
+        cdef INDEX_t n = _accumulators.shape[0]
+        for i in range(n):
+            _accumulators[i] = 0.0
+        
+    cdef accumulate(BirdNetwork self):
+        cdef cnp.ndarray[FLOAT_t, ndim=1] _accumulators = <cnp.ndarray[FLOAT_t, ndim=1]> self._accumulators
+        cdef cnp.ndarray[FLOAT_t, ndim=2] _nodes = <cnp.ndarray[FLOAT_t, ndim=2]> self._nodes
+        cdef cnp.ndarray[INDEX_t, ndim=1] _layers = <cnp.ndarray[INDEX_t, ndim=1]> self._layers
+        cdef INDEX_t n_nodes = _nodes.shape[0]
+        cdef INDEX_t n_layers = _layers.shape[0]
+        cdef INDEX_t n_outputs = _layers[n_layers - 1]
+        cdef INDEX_t i
+        for i in range(n_outputs):
+            _accumulators[i] += _nodes[n_nodes - n_outputs + i]
+    
+    cdef FLOAT_t present(BirdNetwork self, cnp.ndarray[FLOAT_t, ndim=2] y, INDEX_t row):
+        cdef cnp.ndarray[FLOAT_t, ndim=1] _accumulators = <cnp.ndarray[FLOAT_t, ndim=1]> self._accumulators
+        cdef cnp.ndarray[FLOAT_t, ndim=2] _nodes = <cnp.ndarray[FLOAT_t, ndim=2]> self._nodes
+        cdef cnp.ndarray[INDEX_t, ndim=1] _layers = <cnp.ndarray[INDEX_t, ndim=1]> self._layers
+        cdef INDEX_t n = y.shape[1]
+        cdef INDEX_t i
+        cdef INDEX_t n_layers = _layers.shape[0]
+        cdef INDEX_t n_nodes = _nodes.shape[0]
+        cdef INDEX_t output_size = _layers[n_layers - 1]
+        cdef INDEX_t output_start = n_nodes - output_size
+        cdef INDEX_t node
+        cdef FLOAT_t pred
+        cdef FLOAT_t error = 0.0
+        cdef FLOAT_t output
+        for i in range(output_size):
+            node = i + output_start
+            pred = _accumulators[i]
+            output = _nodes[node,1]
+            _nodes[node,2] = (y[row,i] - pred)*self.f_prime(output)
+            error += 0.5*(y[row,i] - pred)**2
+        return error
+    
+    cpdef fit(BirdNetwork self, cnp.ndarray[FLOAT_t, ndim=2] X, cnp.ndarray[FLOAT_t, ndim=2] y, cnp.ndarray[FLOAT_t, ndim=1] t, cnp.ndarray[INDEX_t, ndim=1] ids):
+        cdef cnp.ndarray[FLOAT_t, ndim=2] _nodes = <cnp.ndarray[FLOAT_t, ndim=2]> self._nodes
+        cdef cnp.ndarray[INDEX_t, ndim=2] _connections = <cnp.ndarray[INDEX_t, ndim=2]> self._connections
+        cdef cnp.ndarray[FLOAT_t, ndim=1] _weights = <cnp.ndarray[FLOAT_t, ndim=1]> self._weights
+        cdef INDEX_t m = X.shape[0]
+        cdef INDEX_t n = X.shape[1]
+        cdef INDEX_t n_layers = self._layers.shape[0]
+        cdef INDEX_t p = self._layers[n_layers-1]
+        cdef INDEX_t row
+        cdef INDEX_t n_nodes = _nodes.shape[0]
+        cdef INDEX_t output_start = n_nodes - p
+        cdef INDEX_t conn
+        cdef INDEX_t from_ind
+        cdef INDEX_t to_ind
+        cdef FLOAT_t rate = 2.0 * self.rate
+        cdef INDEX_t n_connections = _connections.shape[0]
+        cdef FLOAT_t error = 0.0
+        cdef FLOAT_t prev_error = 0.0
+        cdef rate_increase = 1.2
+        cdef rate_decrease = 0.5
+        cdef cnp.ndarray[FLOAT_t, ndim=1] delta = <cnp.ndarray[FLOAT_t, ndim=1]> np.zeros(shape=n_connections,dtype=FLOAT)
+        cdef INDEX_t current_id
+        cdef INDEX_t first_row
+        
+        
+        
+        while True:
+            row = 0
+            y_row = 0
+            while row < m:
+                self.reset_accumulators()
+                current_id = ids[row]
+                first_row = row
+                while ids[row] == current_id:
+                    self.reset_nodes()
+                    self.input(X, row)
+                    self.prop()
+                    self.accumulate()
+                    row += 1
+                error += self.present(y,y_row)
+                row = first_row
+                while ids[row] == current_id:
+                    self.reset_nodes()
+                    self.input(X, row)
+                    self.prop()
+                    self.back_prop()
+                    row += 1
+                    for conn in range(n_connections):
+                        from_ind = _connections[conn,0]
+                        to_ind = _connections[conn,1]
+                        weight = _weights[conn]
+                        delta[conn] += _nodes[to_ind,2] * _nodes[from_ind,1]
+                y_row += 1
+                
+            if self.stop_check(error):
+                break
+            for conn in range(n_connections):
+                _weights[conn] += rate * delta[conn] / m
+                delta[conn] = 0.0
+            if error > prev_error:
+                rate *= rate_decrease
+            elif error <= prev_error:
+                rate *= rate_increase
+            prev_error = error
             
